@@ -1,0 +1,106 @@
+# src/fearnation_mcp/utils.py
+"""Slug validation, URL safety, ISO date validation, JSON-lines stderr logging."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import sys
+from datetime import datetime
+from urllib.parse import urljoin, urlparse
+
+_SLUG_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_slug(slug: str) -> str:
+    """Validate a Ghost slug. Raises ValueError on invalid input.
+
+    Ghost slugs match: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ (lowercase alnum + hyphens,
+    no leading/trailing hyphen, no underscores).
+    """
+    if not _SLUG_RE.match(slug):
+        raise ValueError(f"Invalid slug: {slug!r}")
+    return slug
+
+
+def build_post_url(slug: str) -> str:
+    """Build the canonical post URL for a slug, with host/scheme pinning."""
+    validate_slug(slug)
+    resolved = urljoin("https://fearnation.club/", slug + "/")
+    parsed = urlparse(resolved)
+    if parsed.netloc != "fearnation.club" or parsed.scheme != "https":
+        raise ValueError(f"URL did not resolve to fearnation.club: {resolved}")
+    if parsed.path.strip("/") != slug:
+        raise ValueError(f"URL path drifted from slug: {resolved}")
+    return resolved
+
+
+def validate_iso_date(date_str: str) -> str:
+    """Validate an ISO 8601 date string (YYYY-MM-DD)."""
+    if not _ISO_DATE_RE.match(date_str):
+        raise ValueError(f"Invalid ISO date: {date_str!r}")
+    datetime.strptime(date_str, "%Y-%m-%d")
+    return date_str
+
+
+class _JsonLinesFormatter(logging.Formatter):
+    """Format log records as JSON-lines to stderr."""
+
+    _RESERVED = {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "taskName",
+        "ts",
+        "level",
+        "logger",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, object] = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in self._RESERVED:
+                payload[key] = value
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return a logger configured to emit JSON-lines to stderr.
+
+    Idempotent — calling twice with same name returns same logger
+    without adding duplicate handlers.
+    """
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(_JsonLinesFormatter())
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    return logger
