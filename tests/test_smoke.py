@@ -8,6 +8,7 @@ Run manually before release with:
 from __future__ import annotations
 
 import sqlite3
+from urllib.parse import urlparse
 
 import pytest
 
@@ -56,7 +57,9 @@ def test_single_post_fetch_and_parse() -> None:
         if entries and entries[0].is_sitemap:
             child_xml = fetch_url(client, entries[0].loc)
             entries = parse_sitemap(child_xml)
-        post_entries = [e for e in entries if not e.is_sitemap]
+        # sitemap-pages.xml may include the home page (loc='https://fearnation.club/')
+        # which has no slug; skip entries whose path is empty.
+        post_entries = [e for e in entries if not e.is_sitemap and urlparse(e.loc).path.strip("/")]
         assert post_entries
         first = post_entries[0]
         slug = _slug_from_link(first.loc)
