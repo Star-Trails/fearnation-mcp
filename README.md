@@ -81,6 +81,11 @@ uv run fearnation-mcp
 
 See `docs/superpowers/specs/2026-07-08-fearnation-mcp-design.md`.
 
+## Contributors
+
+- **[Star-Trails](https://github.com/Star-Trails)** — author, maintainer
+- **[OpenCode](https://github.com/sst/opencode)** — AI coding assistant used throughout development (spec design, TDD implementation, code review)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
