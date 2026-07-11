@@ -106,6 +106,38 @@ class TestSearchItems:
         hits = search_items(conn, "華為")
         assert len(hits) == 1
 
+    def test_and_mode_matches_keywords_in_different_parts(self, conn: sqlite3.Connection) -> None:
+        _seed_post(
+            conn,
+            items=[("科技新闻", "华为发布新手机", "美国监管机构随后回应")],
+        )
+        hits = search_items(conn, "华为 美国", mode="and")
+        assert len(hits) == 1
+
+    def test_phrase_mode_requires_adjacent_terms(self, conn: sqlite3.Connection) -> None:
+        _seed_post(
+            conn,
+            items=[("科技新闻", "华为发布新手机", "美国监管机构随后回应")],
+        )
+        assert search_items(conn, "华为 美国", mode="phrase") == []
+
+        _seed_post(
+            conn,
+            slug="exact",
+            items=[("科技新闻", "华为 美国合作项目", "正文")],
+        )
+        hits = search_items(conn, "华为 美国", mode="phrase")
+        assert [hit.slug for hit in hits] == ["exact"]
+
+    def test_default_mode_is_and(self, conn: sqlite3.Connection) -> None:
+        _seed_post(conn, items=[("科技新闻", "华为发布新手机", "美国监管机构回应")])
+        assert len(search_items(conn, "华为 美国")) == 1
+
+    def test_invalid_mode_raises(self, conn: sqlite3.Connection) -> None:
+        _seed_post(conn)
+        with pytest.raises(ValueError, match="mode must be"):
+            search_items(conn, "华为", mode="or")  # type: ignore[arg-type]
+
     def test_section_filter(self, conn: sqlite3.Connection) -> None:
         _seed_post(
             conn,

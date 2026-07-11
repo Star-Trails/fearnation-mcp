@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import opencc
 
@@ -43,6 +43,8 @@ _CJK_RANGE = (
 # insert a space between them. We don't split CJK followed by space/punct
 # (those already tokenize as boundaries).
 _CJK_BOUNDARY_RE = re.compile(rf"([{_CJK_RANGE}])(?=[{_CJK_RANGE}A-Za-z0-9])")
+
+SearchMode = Literal["and", "phrase"]
 
 
 def _get_converter() -> opencc.OpenCC:
@@ -86,6 +88,28 @@ class SearchHit:
     rank: float
 
 
+def _quote_fts_phrase(text: str) -> str:
+    """Quote normalized text as a safe FTS5 phrase."""
+    return f'"{text.replace(chr(34), chr(34) * 2)}"'
+
+
+def _build_match_expression(query: str, mode: SearchMode) -> str:
+    """Build a safe FTS5 expression for AND-keyword or exact-phrase search."""
+    if mode not in ("and", "phrase"):
+        raise ValueError(f"mode must be 'and' or 'phrase', got {mode!r}")
+
+    if mode == "phrase":
+        normalized = normalize_text(query).strip()
+        return _quote_fts_phrase(normalized) if normalized else ""
+
+    phrases = [
+        _quote_fts_phrase(normalized)
+        for term in query.split()
+        if (normalized := normalize_text(term).strip())
+    ]
+    return " AND ".join(phrases)
+
+
 def search_items(
     conn: sqlite3.Connection,
     query: str,
@@ -93,6 +117,7 @@ def search_items(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 20,
+    mode: SearchMode = "and",
 ) -> list[SearchHit]:
     """Search indexed items by FTS5 + filters.
 
@@ -102,6 +127,8 @@ def search_items(
         date_from: Optional ISO date (inclusive).
         date_to: Optional ISO date (inclusive).
         limit: Max results to return (default 20, max 200).
+        mode: ``and`` requires every whitespace-delimited keyword to match;
+            ``phrase`` requires the complete query to appear as one phrase.
     """
     if date_from:
         validate_iso_date(date_from)
@@ -110,13 +137,9 @@ def search_items(
     if limit < 1 or limit > 200:
         raise ValueError(f"limit must be in [1, 200], got {limit}")
 
-    normalized_query = normalize_text(query).strip()
-    if not normalized_query:
+    match_expr = _build_match_expression(query, mode)
+    if not match_expr:
         return []
-
-    # Escape double-quote to avoid breaking MATCH grammar.
-    safe_query = normalized_query.replace('"', '""')
-    match_expr = f'"{safe_query}"'
 
     sql_parts: list[str] = [
         "SELECT items.post_slug AS slug, items.section, items.headline,",
@@ -157,6 +180,7 @@ def search_items(
         "search executed",
         extra={
             "query": query,
+            "mode": mode,
             "section": section,
             "date_from": date_from,
             "date_to": date_to,

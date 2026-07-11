@@ -75,6 +75,17 @@ class TestSearchNews:
         with pytest.raises(ValueError):
             search_news("x", date_from="not-a-date")
 
+    def test_and_mode(self, conn: sqlite3.Connection) -> None:
+        assert len(search_news("世界苦茶 华为", mode="and")) == 2
+
+    def test_phrase_mode(self, conn: sqlite3.Connection) -> None:
+        assert search_news("世界苦茶 华为", mode="phrase") == []
+
+    def test_connection_is_closed_after_success(self, conn: sqlite3.Connection) -> None:
+        search_news("华为")
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
 
 class TestGetPost:
     def test_get_by_slug(self, conn: sqlite3.Connection) -> None:
@@ -100,6 +111,12 @@ class TestGetPost:
     def test_missing_post_raises(self, conn: sqlite3.Connection) -> None:
         with pytest.raises(KeyError):
             get_post("nonexistent-slug")
+
+    def test_connection_is_closed_after_error(self, conn: sqlite3.Connection) -> None:
+        with pytest.raises(ValueError):
+            get_post("../etc/passwd")
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
 
 
 class TestListRecent:

@@ -39,10 +39,15 @@ Cursor and other MCP clients: same `command` path with empty args.
 
 ## Tools
 
-### `search_news(query, section?, date_from?, date_to?, limit?)`
+### `search_news(query, section?, date_from?, date_to?, limit?, mode="and")`
 
 Full-text search over the indexed news items. Returns matches with `slug`,
 `section`, `headline`, `body`, `pub_date`, `seq`.
+
+- `mode="and"` (default): every whitespace-delimited keyword must match,
+  e.g. `华为 美国` matches an item containing both terms anywhere.
+- `mode="phrase"`: the complete query must match in the given order,
+  e.g. `华为 发布` only matches that exact phrase.
 
 ### `get_post(slug_or_date)`
 

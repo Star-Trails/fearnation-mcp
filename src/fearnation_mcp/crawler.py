@@ -354,11 +354,12 @@ def crawl_all(
         if rate_limit_sec > 0:
             time.sleep(rate_limit_sec)
 
-    set_meta(
-        conn,
-        "full_crawl_done",
-        datetime.now(UTC).isoformat(timespec="seconds"),
-    )
+    with conn:
+        set_meta(
+            conn,
+            "full_crawl_done",
+            datetime.now(UTC).isoformat(timespec="seconds"),
+        )
     report.duration_sec = time.time() - start
     log.info(
         "full crawl complete",
@@ -408,11 +409,12 @@ def refresh_rss(client: httpx.Client, conn: sqlite3.Connection) -> int:
         upsert_parsed_post(conn, item.slug, item.content_html, parsed)
         new_count += 1
 
-    set_meta(
-        conn,
-        "last_rss_fetch",
-        datetime.now(UTC).isoformat(timespec="seconds"),
-    )
+    with conn:
+        set_meta(
+            conn,
+            "last_rss_fetch",
+            datetime.now(UTC).isoformat(timespec="seconds"),
+        )
     log.info("rss refresh complete", extra={"new_posts": new_count})
     return new_count
 

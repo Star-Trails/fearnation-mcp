@@ -13,14 +13,14 @@ from fearnation_mcp.crawler import (
     parse_rss,
     parse_sitemap,
 )
-from fearnation_mcp.db import get_meta, init_schema
+from fearnation_mcp.db import get_connection, get_meta, init_schema
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class TestParseSitemap:
     def test_parse_urlset(self) -> None:
-        xml = (FIXTURES / "sitemap-posts.xml").read_text()
+        xml = (FIXTURES / "sitemap-posts.xml").read_text(encoding="utf-8")
         entries = parse_sitemap(xml)
         assert len(entries) == 3
         assert entries[0].loc == "https://fearnation.club/shijie-kucha-2024-01-15/"
@@ -28,7 +28,7 @@ class TestParseSitemap:
         assert not entries[0].is_sitemap
 
     def test_parse_sitemapindex_returns_entries_to_recurse(self) -> None:
-        xml = (FIXTURES / "sitemap-index.xml").read_text()
+        xml = (FIXTURES / "sitemap-index.xml").read_text(encoding="utf-8")
         entries = parse_sitemap(xml)
         assert len(entries) == 2
         assert entries[0].loc == "https://fearnation.club/sitemap-posts.xml"
@@ -43,7 +43,7 @@ class TestParseSitemap:
 
 class TestParseRss:
     def test_parse_rss_extracts_entries(self) -> None:
-        xml = (FIXTURES / "rss.xml").read_text()
+        xml = (FIXTURES / "rss.xml").read_text(encoding="utf-8")
         items = parse_rss(xml)
         assert len(items) == 2
         first = items[0]
@@ -53,7 +53,7 @@ class TestParseRss:
         assert "<h1>苦茶数据</h1>" in first.content_html
 
     def test_slug_extracted_from_link(self) -> None:
-        xml = (FIXTURES / "rss.xml").read_text()
+        xml = (FIXTURES / "rss.xml").read_text(encoding="utf-8")
         items = parse_rss(xml)
         assert items[1].slug == "taiwan-alert-2024-01-14"
 
@@ -114,11 +114,15 @@ class TestCrawlAll:
     def test_full_crawl_indexes_all_posts(self, conn: sqlite3.Connection) -> None:
         client = _MockClient(
             {
-                "/sitemap.xml": (FIXTURES / "sitemap-index.xml").read_text(),
-                "/sitemap-posts.xml": (FIXTURES / "sitemap-posts.xml").read_text(),
+                "/sitemap.xml": (FIXTURES / "sitemap-index.xml").read_text(encoding="utf-8"),
+                "/sitemap-posts.xml": (FIXTURES / "sitemap-posts.xml").read_text(encoding="utf-8"),
                 "/sitemap-pages.xml": '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>',
-                "/shijie-kucha-2024-01-15/": (FIXTURES / "post-world-tea.html").read_text(),
-                "/taiwan-alert-2024-01-14/": (FIXTURES / "post-taiwan-alert.html").read_text(),
+                "/shijie-kucha-2024-01-15/": (FIXTURES / "post-world-tea.html").read_text(
+                    encoding="utf-8"
+                ),
+                "/taiwan-alert-2024-01-14/": (FIXTURES / "post-taiwan-alert.html").read_text(
+                    encoding="utf-8"
+                ),
                 "/old-post-2020-01-01/": (
                     "<html><body><main class='post-content'>"
                     "<h1>新闻</h1><p><strong>• 老</strong><br>内容</p>"
@@ -137,14 +141,34 @@ class TestCrawlAll:
         assert items_count >= 4
         assert get_meta(conn, "full_crawl_done") is not None
 
+    def test_full_crawl_metadata_persists_after_reopen(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "crawl.db"
+        disk_conn = get_connection(db_path)
+        client = _MockClient(
+            {"/sitemap.xml": '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" />'}
+        )
+
+        crawl_all(client, disk_conn, rate_limit_sec=0)
+        disk_conn.close()
+
+        reopened = get_connection(db_path)
+        try:
+            assert get_meta(reopened, "full_crawl_done") is not None
+        finally:
+            reopened.close()
+
     def test_idempotent_skip_when_lastmod_unchanged(self, conn: sqlite3.Connection) -> None:
         client = _MockClient(
             {
-                "/sitemap.xml": (FIXTURES / "sitemap-index.xml").read_text(),
-                "/sitemap-posts.xml": (FIXTURES / "sitemap-posts.xml").read_text(),
+                "/sitemap.xml": (FIXTURES / "sitemap-index.xml").read_text(encoding="utf-8"),
+                "/sitemap-posts.xml": (FIXTURES / "sitemap-posts.xml").read_text(encoding="utf-8"),
                 "/sitemap-pages.xml": '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>',
-                "/shijie-kucha-2024-01-15/": (FIXTURES / "post-world-tea.html").read_text(),
-                "/taiwan-alert-2024-01-14/": (FIXTURES / "post-taiwan-alert.html").read_text(),
+                "/shijie-kucha-2024-01-15/": (FIXTURES / "post-world-tea.html").read_text(
+                    encoding="utf-8"
+                ),
+                "/taiwan-alert-2024-01-14/": (FIXTURES / "post-taiwan-alert.html").read_text(
+                    encoding="utf-8"
+                ),
                 "/old-post-2020-01-01/": (
                     "<html><body><main class='post-content'>"
                     "<h1>x</h1><p><strong>• y</strong><br>z</p>"
@@ -174,11 +198,15 @@ class TestCrawlAll:
 
         client = _FlakyClient(
             {
-                "/sitemap.xml": (FIXTURES / "sitemap-index.xml").read_text(),
-                "/sitemap-posts.xml": (FIXTURES / "sitemap-posts.xml").read_text(),
+                "/sitemap.xml": (FIXTURES / "sitemap-index.xml").read_text(encoding="utf-8"),
+                "/sitemap-posts.xml": (FIXTURES / "sitemap-posts.xml").read_text(encoding="utf-8"),
                 "/sitemap-pages.xml": '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>',
-                "/shijie-kucha-2024-01-15/": (FIXTURES / "post-world-tea.html").read_text(),
-                "/taiwan-alert-2024-01-14/": (FIXTURES / "post-taiwan-alert.html").read_text(),
+                "/shijie-kucha-2024-01-15/": (FIXTURES / "post-world-tea.html").read_text(
+                    encoding="utf-8"
+                ),
+                "/taiwan-alert-2024-01-14/": (FIXTURES / "post-taiwan-alert.html").read_text(
+                    encoding="utf-8"
+                ),
                 "/old-post-2020-01-01/": "<html><body>ok</body></html>",
             },
             fail_once_for="/taiwan-alert-2024-01-14/",
@@ -192,7 +220,7 @@ class TestRefreshRss:
     def test_refresh_indexes_new_posts(self, conn: sqlite3.Connection) -> None:
         client = _MockClient(
             {
-                "/rss/": (FIXTURES / "rss.xml").read_text(),
+                "/rss/": (FIXTURES / "rss.xml").read_text(encoding="utf-8"),
             }
         )
         count = refresh_rss(client, conn)
@@ -201,6 +229,20 @@ class TestRefreshRss:
         assert "shijie-kucha-2024-01-15" in slugs
         assert "taiwan-alert-2024-01-14" in slugs
         assert get_meta(conn, "last_rss_fetch") is not None
+
+    def test_refresh_metadata_persists_after_reopen(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "rss.db"
+        disk_conn = get_connection(db_path)
+        client = _MockClient({"/rss/": (FIXTURES / "rss.xml").read_text(encoding="utf-8")})
+
+        refresh_rss(client, disk_conn)
+        disk_conn.close()
+
+        reopened = get_connection(db_path)
+        try:
+            assert get_meta(reopened, "last_rss_fetch") is not None
+        finally:
+            reopened.close()
 
     def test_refresh_fetch_failure_returns_zero(self, conn: sqlite3.Connection) -> None:
         client = _MockClient({})  # all 404

@@ -14,9 +14,9 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import threading
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server import MCPServer
 
@@ -37,6 +37,16 @@ _TODAY_OVERRIDE: date | None = None
 def _get_conn() -> sqlite3.Connection:
     """Get a DB connection (real path). Tests monkeypatch this."""
     return get_connection(DB_PATH)
+
+
+@contextlib.contextmanager
+def _db_conn() -> Generator[sqlite3.Connection, None, None]:
+    """Open one tool-scoped connection and close it on every exit path."""
+    conn = _get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _maybe_refresh_rss(conn: sqlite3.Connection) -> None:
@@ -94,15 +104,15 @@ def _maybe_weekly_sweep(conn: sqlite3.Connection) -> None:
         try:
             from fearnation_mcp.crawler import crawl_all
 
-            bg_conn = _get_conn()
-            with make_http_client(timeout=30.0, follow_redirects=True) as client:
-                crawl_all(client, bg_conn)
-                set_meta(
-                    bg_conn,
-                    "last_sitemap_sweep",
-                    datetime.now(UTC).isoformat(timespec="seconds"),
-                )
-            bg_conn.close()
+            with _db_conn() as bg_conn:
+                with make_http_client(timeout=30.0, follow_redirects=True) as client:
+                    crawl_all(client, bg_conn)
+                with bg_conn:
+                    set_meta(
+                        bg_conn,
+                        "last_sitemap_sweep",
+                        datetime.now(UTC).isoformat(timespec="seconds"),
+                    )
         except Exception as exc:  # noqa: BLE001
             log.warning("weekly sitemap sweep failed", extra={"error": str(exc)})
 
@@ -127,32 +137,32 @@ def _bootstrap_metadata(conn: sqlite3.Connection) -> None:
     )
 
     def _bg() -> None:
-        bg_conn = _get_conn()
-        # Cheap self-heal first: re-parse stored-but-unparsed posts (no network).
-        try:
-            from fearnation_mcp.crawler import reparse_pending
-
-            reparse_pending(bg_conn)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("startup reparse failed", extra={"error": str(exc)})
-
-        if needs_bootstrap:
+        with _db_conn() as bg_conn:
+            # Cheap self-heal first: re-parse stored-but-unparsed posts (no network).
             try:
-                from fearnation_mcp.crawler import crawl_all
+                from fearnation_mcp.crawler import reparse_pending
 
-                with make_http_client(timeout=30.0, follow_redirects=True) as client:
-                    crawl_all(client, bg_conn)
-                    set_meta(
-                        bg_conn,
-                        "last_sitemap_sweep",
-                        datetime.now(UTC).isoformat(timespec="seconds"),
-                    )
+                reparse_pending(bg_conn)
             except Exception as exc:  # noqa: BLE001
-                log.warning("bootstrap crawl failed", extra={"error": str(exc)})
-        else:
-            # Subsequent runs: normal RSS cooldown refresh (no-op if fresh).
-            _maybe_refresh_rss(bg_conn)
-        bg_conn.close()
+                log.warning("startup reparse failed", extra={"error": str(exc)})
+
+            if needs_bootstrap:
+                try:
+                    from fearnation_mcp.crawler import crawl_all
+
+                    with make_http_client(timeout=30.0, follow_redirects=True) as client:
+                        crawl_all(client, bg_conn)
+                    with bg_conn:
+                        set_meta(
+                            bg_conn,
+                            "last_sitemap_sweep",
+                            datetime.now(UTC).isoformat(timespec="seconds"),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("bootstrap crawl failed", extra={"error": str(exc)})
+            else:
+                # Subsequent runs: normal RSS cooldown refresh (no-op if fresh).
+                _maybe_refresh_rss(bg_conn)
 
     if needs_bootstrap:
         threading.Thread(target=_bg, daemon=True).start()
@@ -165,7 +175,8 @@ def _bootstrap_metadata(conn: sqlite3.Connection) -> None:
 async def _app_lifespan(server: MCPServer[Any]) -> AsyncGenerator[dict[str, Any]]:
     """Background-bootstrap crawl on first run; do not block startup (spec §3)."""
     try:
-        _bootstrap_metadata(_get_conn())
+        with _db_conn() as conn:
+            _bootstrap_metadata(conn)
     except Exception as exc:  # noqa: BLE001
         log.warning("lifespan init failed", extra={"error": str(exc)})
     yield {}
@@ -184,6 +195,7 @@ def search_news(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 20,
+    mode: Literal["and", "phrase"] = "and",
 ) -> list[dict[str, Any]]:
     """Search FearNation news items by full-text query.
 
@@ -197,31 +209,33 @@ def search_news(
         date_from: Optional ISO date YYYY-MM-DD (inclusive).
         date_to: Optional ISO date YYYY-MM-DD (inclusive).
         limit: Max results (1-200, default 20).
+        mode: ``and`` requires all keywords; ``phrase`` requires exact word order.
     """
     from fearnation_mcp.search import search_items
 
-    conn = _get_conn()
-    _maybe_refresh_rss(conn)
-    _maybe_weekly_sweep(conn)
-    hits = search_items(
-        conn,
-        query,
-        section=section,
-        date_from=date_from,
-        date_to=date_to,
-        limit=limit,
-    )
-    return [
-        {
-            "slug": h.slug,
-            "section": h.section,
-            "headline": h.headline,
-            "body": h.body_text,
-            "pub_date": h.pub_date,
-            "seq": h.seq,
-        }
-        for h in hits
-    ]
+    with _db_conn() as conn:
+        _maybe_refresh_rss(conn)
+        _maybe_weekly_sweep(conn)
+        hits = search_items(
+            conn,
+            query,
+            section=section,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            mode=mode,
+        )
+        return [
+            {
+                "slug": h.slug,
+                "section": h.section,
+                "headline": h.headline,
+                "body": h.body_text,
+                "pub_date": h.pub_date,
+                "seq": h.seq,
+            }
+            for h in hits
+        ]
 
 
 @mcp.tool()
@@ -231,37 +245,37 @@ def get_post(slug_or_date: str) -> dict[str, Any] | list[dict[str, Any]]:
     If multiple posts exist for a date, returns a list of post summaries.
     For a single post, returns items + financial_data.
     """
-    conn = _get_conn()
-    _maybe_refresh_rss(conn)
-    _maybe_weekly_sweep(conn)
+    with _db_conn() as conn:
+        _maybe_refresh_rss(conn)
+        _maybe_weekly_sweep(conn)
 
-    is_date = False
-    try:
-        validate_iso_date(slug_or_date)
-        is_date = True
-    except ValueError:
-        validate_slug(slug_or_date)
+        is_date = False
+        try:
+            validate_iso_date(slug_or_date)
+            is_date = True
+        except ValueError:
+            validate_slug(slug_or_date)
 
-    if is_date:
-        rows = conn.execute(
-            "SELECT slug, title, pub_date, post_type FROM posts "
-            "WHERE pub_date = ? ORDER BY slug",
-            (slug_or_date,),
-        ).fetchall()
-        if not rows:
-            raise KeyError(f"No post found for date {slug_or_date}")
-        if len(rows) == 1:
-            return _fetch_full_post(conn, rows[0]["slug"])
-        return [
-            {
-                "slug": r["slug"],
-                "title": r["title"],
-                "pub_date": r["pub_date"],
-                "post_type": r["post_type"],
-            }
-            for r in rows
-        ]
-    return _fetch_full_post(conn, slug_or_date)
+        if is_date:
+            rows = conn.execute(
+                "SELECT slug, title, pub_date, post_type FROM posts "
+                "WHERE pub_date = ? ORDER BY slug",
+                (slug_or_date,),
+            ).fetchall()
+            if not rows:
+                raise KeyError(f"No post found for date {slug_or_date}")
+            if len(rows) == 1:
+                return _fetch_full_post(conn, rows[0]["slug"])
+            return [
+                {
+                    "slug": r["slug"],
+                    "title": r["title"],
+                    "pub_date": r["pub_date"],
+                    "post_type": r["post_type"],
+                }
+                for r in rows
+            ]
+        return _fetch_full_post(conn, slug_or_date)
 
 
 def _fetch_full_post(conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
@@ -303,27 +317,27 @@ def list_recent(days: int = 7) -> list[dict[str, Any]]:
     """
     if days < 1 or days > 365:
         raise ValueError("days must be in [1, 365]")
-    conn = _get_conn()
-    _maybe_refresh_rss(conn)
-    _maybe_weekly_sweep(conn)
-    today = _TODAY_OVERRIDE or date.today()
-    cutoff = (today - timedelta(days=days)).isoformat()
-    rows = conn.execute(
-        "SELECT p.slug, p.title, p.pub_date, p.post_type, "
-        "(SELECT COUNT(*) FROM items WHERE post_slug = p.slug) AS item_count "
-        "FROM posts p WHERE p.pub_date >= ? ORDER BY p.pub_date DESC",
-        (cutoff,),
-    ).fetchall()
-    return [
-        {
-            "slug": r["slug"],
-            "title": r["title"],
-            "pub_date": r["pub_date"],
-            "post_type": r["post_type"],
-            "item_count": r["item_count"],
-        }
-        for r in rows
-    ]
+    with _db_conn() as conn:
+        _maybe_refresh_rss(conn)
+        _maybe_weekly_sweep(conn)
+        today = _TODAY_OVERRIDE or date.today()
+        cutoff = (today - timedelta(days=days)).isoformat()
+        rows = conn.execute(
+            "SELECT p.slug, p.title, p.pub_date, p.post_type, "
+            "(SELECT COUNT(*) FROM items WHERE post_slug = p.slug) AS item_count "
+            "FROM posts p WHERE p.pub_date >= ? ORDER BY p.pub_date DESC",
+            (cutoff,),
+        ).fetchall()
+        return [
+            {
+                "slug": r["slug"],
+                "title": r["title"],
+                "pub_date": r["pub_date"],
+                "post_type": r["post_type"],
+                "item_count": r["item_count"],
+            }
+            for r in rows
+        ]
 
 
 @mcp.tool()
@@ -343,34 +357,34 @@ def discover(
     if date_to:
         validate_iso_date(date_to)
 
-    conn = _get_conn()
-    _maybe_refresh_rss(conn)
-    _maybe_weekly_sweep(conn)
-    sql = "SELECT slug, title, pub_date, post_type FROM posts WHERE 1=1"
-    params: list[Any] = []
-    if query:
-        sql += " AND title LIKE ?"
-        params.append(f"%{query}%")
-    if post_type:
-        sql += " AND post_type = ?"
-        params.append(post_type)
-    if date_from:
-        sql += " AND pub_date >= ?"
-        params.append(date_from)
-    if date_to:
-        sql += " AND pub_date <= ?"
-        params.append(date_to)
-    sql += " ORDER BY pub_date DESC LIMIT 50"
-    rows = conn.execute(sql, params).fetchall()
-    return [
-        {
-            "slug": r["slug"],
-            "title": r["title"],
-            "pub_date": r["pub_date"],
-            "post_type": r["post_type"],
-        }
-        for r in rows
-    ]
+    with _db_conn() as conn:
+        _maybe_refresh_rss(conn)
+        _maybe_weekly_sweep(conn)
+        sql = "SELECT slug, title, pub_date, post_type FROM posts WHERE 1=1"
+        params: list[Any] = []
+        if query:
+            sql += " AND title LIKE ?"
+            params.append(f"%{query}%")
+        if post_type:
+            sql += " AND post_type = ?"
+            params.append(post_type)
+        if date_from:
+            sql += " AND pub_date >= ?"
+            params.append(date_from)
+        if date_to:
+            sql += " AND pub_date <= ?"
+            params.append(date_to)
+        sql += " ORDER BY pub_date DESC LIMIT 50"
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            {
+                "slug": r["slug"],
+                "title": r["title"],
+                "pub_date": r["pub_date"],
+                "post_type": r["post_type"],
+            }
+            for r in rows
+        ]
 
 
 def run() -> None:
